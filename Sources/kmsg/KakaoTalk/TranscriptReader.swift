@@ -370,10 +370,17 @@ struct KakaoTalkTranscriptReader {
 
         runner.log("read: row parser messages=\(messages.count)")
 
-        if messages.isEmpty || messages.count < max(3, min(limit / 2, 8)) {
+        // fallback rows carry no side/author; use them only when the row parser found nothing and never label them (me).
+        if messages.isEmpty {
             let fallback = extractFallbackMessages(from: transcriptRoot, limit: limit, referenceDate: referenceDate)
             runner.log("read: fallback messages=\(fallback.count)")
-            messages.append(contentsOf: fallback)
+            messages.append(contentsOf: fallback.map { m in
+                TranscriptMessage(
+                    author: m.author ?? "(unknown)", timeRaw: m.timeRaw, body: m.body,
+                    imageCount: m.imageCount, linkCount: m.linkCount, attachmentCount: m.attachmentCount,
+                    isSystem: m.isSystem, logicalTimestamp: m.logicalTimestamp, date: m.date
+                )
+            })
         }
 
         return Array(deduplicateMessagesPreservingOrder(messages).suffix(limit))
@@ -837,6 +844,12 @@ struct KakaoTalkTranscriptReader {
         if ratio >= 0.62 {
             return .right
         }
+        // wide bubbles land in the 0.56-0.62 band; decide by the nearer transcript edge, keep centred notices unknown.
+        let leftGap = candidateFrame.minX - transcriptFrame.minX
+        let rightGap = transcriptFrame.maxX - candidateFrame.maxX
+        if abs(leftGap - rightGap) > 8 {
+            return rightGap < leftGap ? .right : .left
+        }
         return .unknown
     }
 
@@ -849,12 +862,16 @@ struct KakaoTalkTranscriptReader {
             return (explicitAuthor, "explicit")
         }
 
-        if analysis.side == .right || analysis.side == .unknown {
+        if analysis.side == .right {
             return (nil, "default-me")
+        }
+        // never label an unknown-side or unresolved-left row as (me); channel notices were misattributed.
+        if analysis.side == .unknown {
+            return ("(unknown)", "unknown-side")
         }
 
         guard let anchorAuthor = leftAnchorAuthor else {
-            return (nil, "left-unresolved")
+            return ("(peer)", "left-unresolved")
         }
 
         guard isForwardTimeProgress(anchorTimeRaw: leftAnchorTimeRaw, candidateTimeRaw: analysis.timeRaw) else {

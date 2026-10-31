@@ -1,3 +1,4 @@
+import ApplicationServices
 import Foundation
 
 struct MessageTranscriptContext {
@@ -51,6 +52,12 @@ struct MessageContextResolver {
     }
 
     private func resolveMessageInputField(chatWindow: UIElement) -> UIElement? {
+        // window-scoped input lookup that skips transcript subtrees, so non-focused windows resolve their own input.
+        if let input = findWindowOwnedInput(in: chatWindow) {
+            runner.log("read: input resolved via window-scoped search")
+            return input
+        }
+
         if let cachedInput = resolveCachedElement(
             slot: .messageInput,
             root: chatWindow,
@@ -351,8 +358,31 @@ struct MessageContextResolver {
         return candidates
     }
 
+    private func findWindowOwnedInput(in window: UIElement) -> UIElement? {
+        var queue = window.children
+        var index = 0
+        var textAreas: [UIElement] = []
+        while index < queue.count && index < 600 {
+            let element = queue[index]
+            index += 1
+            let role = element.role ?? ""
+            if role == kAXTableRole || role == kAXOutlineRole || role == kAXListRole { continue }
+            // KakaoTalk's input TextArea has no AXEnabled attribute when its window is not key; match it by its description instead.
+            if role == kAXTextAreaRole, element.axDescription == "메시지 입력" { return element }
+            if role == kAXTextAreaRole { textAreas.append(element) }
+            queue.append(contentsOf: element.children)
+        }
+        // fallback for chat layouts without the description: bottom-most window-owned TextArea outside the transcript.
+        return textAreas.max { ($0.frame?.minY ?? 0) < ($1.frame?.minY ?? 0) }
+    }
+
     private func pickMessageInputField(from fields: [UIElement], in window: UIElement) -> UIElement? {
-        fields.sorted { lhs, rhs in
+        // keep only inputs owned by the requested chat window; focused-window inputs caused cross-room reads/sends.
+        fields.filter { field in
+            guard let owner: AXUIElement = field.attributeOptional(kAXWindowAttribute) else { return false }
+            return CFEqual(owner, window.axElement)
+        }
+        .sorted { lhs, rhs in
             scoreMessageInputCandidate(lhs, in: window) > scoreMessageInputCandidate(rhs, in: window)
         }
         .first
