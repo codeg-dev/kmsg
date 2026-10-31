@@ -228,10 +228,12 @@ struct SendCommand: ParsableCommand {
             throw ValidationError("[BACKGROUND_SAFE_BLOCKED] Unique probed window-owned send button unavailable (buttons=\(buttons.count), \(composerInfo)).")
         }
         var settable: DarwinBoolean = false
+        // An empty composer may report no AXValue at all; treat that as empty, but never overwrite a real draft.
+        let draftLength = input.stringValue?.count ?? 0
         guard AXUIElementIsAttributeSettable(input.axElement, kAXValueAttribute as CFString, &settable) == .success,
-              settable.boolValue, input.stringValue == ""
+              settable.boolValue, draftLength == 0
         else {
-            throw ValidationError("[BACKGROUND_SAFE_BLOCKED] Composer is not writable or has an existing/unknown draft.")
+            throw ValidationError("[BACKGROUND_SAFE_BLOCKED] Composer is not writable or has an existing/unknown draft (settable=\(settable.boolValue) draftLength=\(draftLength) \(composerInfo)).")
         }
         // Verification reads only the last few bubble texts of this window; a full transcript parse costs seconds.
         let before = lastBubbleTexts(in: window)
@@ -249,7 +251,7 @@ struct SendCommand: ParsableCommand {
         func verified() -> Bool {
             let now = lastBubbleTexts(in: window)
             guard let last = now.last else { return false }
-            return now != before && bodyMatches(last, sent: message) && input.stringValue == ""
+            return now != before && bodyMatches(last, sent: message) && (input.stringValue ?? "").isEmpty
         }
         // Wall-clock deadline: each verification read itself takes time.
         let deadline = Date().addingTimeInterval(6)
