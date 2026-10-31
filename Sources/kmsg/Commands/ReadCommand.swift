@@ -72,6 +72,9 @@ struct ReadCommand: ParsableCommand {
     @Flag(name: .long, help: "Output in JSON format")
     var json: Bool = false
 
+    @Flag(name: .long, help: "Open the see-all dialog of bubbles truncated with '…' in the target window, read the full text, and close it (briefly takes focus inside KakaoTalk)")
+    var expandSeeAll: Bool = false
+
     func validate() throws {
         if let chatID, !chatID.isEmpty {
             guard chat == nil else {
@@ -165,7 +168,7 @@ struct ReadCommand: ParsableCommand {
             }
         }
 
-        let snapshot: TranscriptSnapshot
+        var snapshot: TranscriptSnapshot
         do {
             snapshot = try transcriptReader.readSnapshot(
                 from: window,
@@ -184,6 +187,10 @@ struct ReadCommand: ParsableCommand {
             print("No message body text extracted from transcript container.")
             print("Use 'kmsg inspect --window <n>' to inspect message nodes.")
             return
+        }
+
+        if expandSeeAll {
+            snapshot = SeeAllExpander(kakao: kakao).expand(snapshot, in: window)
         }
 
         if json {
