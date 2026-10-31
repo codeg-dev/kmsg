@@ -193,21 +193,25 @@ struct SendCommand: ParsableCommand {
         }
         let window = resolution.window
         // Only the composer is needed; resolving the transcript without cache cost seconds per send.
-        guard let input = window.children
-            .filter({ $0.role == kAXScrollAreaRole })
+        let composers = window.children
+            .filter { $0.role == kAXScrollAreaRole }
             .flatMap(\.children)
-            // Friend chats label it "메시지 입력", channel chats "챗봇에게 메시지 입력"; identifier and owner are checked below.
-            .first(where: { $0.role == kAXTextAreaRole })
+            .filter { $0.role == kAXTextAreaRole }
+        // Friend chats label the composer "메시지 입력", channel chats "챗봇에게 메시지 입력"; other text areas
+        // (e.g. a pinned notice) may precede it, so prefer the label and fall back to the bottom-most one.
+        guard let input = composers.first(where: { ($0.axDescription ?? "").hasSuffix("메시지 입력") })
+            ?? composers.max(by: { ($0.frame?.minY ?? 0) < ($1.frame?.minY ?? 0) })
         else {
-            throw ValidationError("[BACKGROUND_SAFE_BLOCKED] Window-owned composer unavailable.")
+            throw ValidationError("[BACKGROUND_SAFE_BLOCKED] Window-owned composer unavailable (candidates=0).")
         }
+        let composerInfo = "candidates=\(composers.count) id=\(input.identifier ?? "-") labelMatch=\((input.axDescription ?? "").hasSuffix("메시지 입력"))"
         guard let owner: AXUIElement = input.attributeOptional(kAXWindowAttribute),
               CFEqual(owner, window.axElement),
               input.role == kAXTextAreaRole,
-              input.identifier == "_NS:51",
+              input.identifier == "_NS:51" || (input.axDescription ?? "").hasSuffix("메시지 입력"),
               let inputFrame = input.frame
         else {
-            throw ValidationError("[BACKGROUND_SAFE_BLOCKED] Composer does not match the probed window-owned input.")
+            throw ValidationError("[BACKGROUND_SAFE_BLOCKED] Composer does not match the probed window-owned input (\(composerInfo)).")
         }
         // probed Korean direct-child send control only.
         let buttons = window.children.filter { button in
@@ -221,7 +225,7 @@ struct SendCommand: ParsableCommand {
             return true
         }
         guard buttons.count == 1, let button = buttons.first else {
-            throw ValidationError("[BACKGROUND_SAFE_BLOCKED] Unique probed window-owned send button unavailable.")
+            throw ValidationError("[BACKGROUND_SAFE_BLOCKED] Unique probed window-owned send button unavailable (buttons=\(buttons.count), \(composerInfo)).")
         }
         var settable: DarwinBoolean = false
         guard AXUIElementIsAttributeSettable(input.axElement, kAXValueAttribute as CFString, &settable) == .success,
