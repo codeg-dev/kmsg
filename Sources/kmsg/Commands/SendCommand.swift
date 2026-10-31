@@ -192,12 +192,14 @@ struct SendCommand: ParsableCommand {
             throw ValidationError("[BACKGROUND_SAFE_BLOCKED] No matching already exposed chat window; target details hidden.")
         }
         let window = resolution.window
-        guard let context = MessageContextResolver(
-            kakao: kakao, runner: runner, useCache: false, interactionMode: .backgroundSafe
-        ).resolve(in: window) else {
-            throw ValidationError("[BACKGROUND_SAFE_BLOCKED] Window-owned composer/transcript unavailable.")
+        // Only the composer is needed; resolving the transcript without cache cost seconds per send.
+        guard let input = window.children
+            .filter({ $0.role == kAXScrollAreaRole })
+            .flatMap(\.children)
+            .first(where: { $0.role == kAXTextAreaRole && $0.axDescription == "메시지 입력" })
+        else {
+            throw ValidationError("[BACKGROUND_SAFE_BLOCKED] Window-owned composer unavailable.")
         }
-        let input = context.inputElement
         guard let owner: AXUIElement = input.attributeOptional(kAXWindowAttribute),
               CFEqual(owner, window.axElement),
               input.role == kAXTextAreaRole,
@@ -226,17 +228,8 @@ struct SendCommand: ParsableCommand {
         else {
             throw ValidationError("[BACKGROUND_SAFE_BLOCKED] Composer is not writable or has an existing/unknown draft.")
         }
-        let reader = KakaoTalkTranscriptReader(kakao: kakao, runner: runner, interactionMode: .backgroundSafe)
-        let before: [TranscriptMessage]
-        do {
-            before = try reader.readSnapshot(
-                from: context, chatWindow: window, fallbackChatTitle: "", limit: 50
-            ).messages
-        } catch TranscriptReadError.noMessageRows {
-            before = []
-        } catch TranscriptReadError.noReadableMessages {
-            before = []
-        }
+        // Verification reads only the last few bubble texts of this window; a full transcript parse costs seconds.
+        let before = lastBubbleTexts(in: window)
 
         try input.setAttribute(kAXValueAttribute, value: message as CFString)
         // KakaoTalk enables the send button asynchronously after an AX value set (measured <=400ms); poll up to 1.5s.
@@ -248,20 +241,41 @@ struct SendCommand: ParsableCommand {
         }
         // KakaoTalk returns kAXErrorFailure (-25200) from AXPress even when it sends (measured); the transcript check below decides.
         try? button.press()
-        let previousMe = before.last(where: { $0.author == nil && !$0.isSystem })
         func verified() -> Bool {
-            guard let after = try? reader.readSnapshot(from: context, chatWindow: window, fallbackChatTitle: "", limit: 50).messages,
-                  let lastMe = after.last(where: { $0.author == nil && !$0.isSystem }) else { return false }
-            return lastMe.body == message && input.stringValue == ""
-                && (lastMe.body != previousMe?.body || lastMe.timeRaw != previousMe?.timeRaw || lastMe.date != previousMe?.date)
+            let now = lastBubbleTexts(in: window)
+            guard let last = now.last else { return false }
+            return now != before && bodyMatches(last, sent: message) && input.stringValue == ""
         }
-        var polled = 0.0
+        // Wall-clock deadline: each verification read itself takes time.
+        let deadline = Date().addingTimeInterval(6)
         var ok = verified()
-        while !ok && polled < 4.0 { Thread.sleep(forTimeInterval: 0.25); polled += 0.25; ok = verified() }
+        while !ok && Date() < deadline { Thread.sleep(forTimeInterval: 0.15); ok = verified() }
         guard ok else {
             throw ValidationError("[BACKGROUND_SAFE_UNVERIFIED] AXPress attempted but a new matching last (me) message was not verified; delivery unknown. Do not blindly retry.")
         }
         print("Message sent and verified in the target window (background-safe; content hidden).")
+    }
+
+    private func lastBubbleTexts(in window: UIElement) -> [String] {
+        let rows = window.children
+            .filter { $0.role == kAXScrollAreaRole }
+            .flatMap { $0.children.filter { $0.role == kAXTableRole } }
+            .flatMap(\.children)
+            .suffix(4)
+        return rows.flatMap { row in
+            row.children.flatMap { cell in
+                cell.children.filter { $0.role == kAXTextAreaRole }.compactMap(\.stringValue)
+            }
+        }
+    }
+
+    // KakaoTalk shows long messages truncated with "…" until the see-all dialog is opened.
+    private func bodyMatches(_ shown: String, sent: String) -> Bool {
+        if shown == sent { return true }
+        guard shown.hasSuffix("…") else { return false }
+        let squash = { (text: String) in text.filter { !$0.isWhitespace } }
+        let visible = squash(String(shown.dropLast()))
+        return !visible.isEmpty && squash(sent).hasPrefix(visible)
     }
 
     private func supportsAction(_ action: String, on element: UIElement) -> Bool {
