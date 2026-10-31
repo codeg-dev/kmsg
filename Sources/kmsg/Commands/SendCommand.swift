@@ -196,7 +196,8 @@ struct SendCommand: ParsableCommand {
         guard let input = window.children
             .filter({ $0.role == kAXScrollAreaRole })
             .flatMap(\.children)
-            .first(where: { $0.role == kAXTextAreaRole && $0.axDescription == "메시지 입력" })
+            // Friend chats label it "메시지 입력", channel chats "챗봇에게 메시지 입력"; identifier and owner are checked below.
+            .first(where: { $0.role == kAXTextAreaRole })
         else {
             throw ValidationError("[BACKGROUND_SAFE_BLOCKED] Window-owned composer unavailable.")
         }

@@ -368,7 +368,7 @@ struct MessageContextResolver {
             let role = element.role ?? ""
             if role == kAXTableRole || role == kAXOutlineRole || role == kAXListRole { continue }
             // KakaoTalk's input TextArea has no AXEnabled attribute when its window is not key; match it by its description instead.
-            if role == kAXTextAreaRole, element.axDescription == "메시지 입력" { return element }
+            if role == kAXTextAreaRole, (element.axDescription ?? "").hasSuffix("메시지 입력") { return element }
             if role == kAXTextAreaRole { textAreas.append(element) }
             queue.append(contentsOf: element.children)
         }
