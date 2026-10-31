@@ -193,33 +193,31 @@ struct SendCommand: ParsableCommand {
         }
         let window = resolution.window
         // Only the composer is needed; resolving the transcript without cache cost seconds per send.
-        let composers = window.children
-            .filter { $0.role == kAXScrollAreaRole }
-            .flatMap(\.children)
-            .filter { $0.role == kAXTextAreaRole }
-        // Friend chats label the composer "메시지 입력", channel chats "챗봇에게 메시지 입력"; other text areas
-        // (e.g. a pinned notice) may precede it, so prefer the label and fall back to the bottom-most one.
-        guard let input = composers.first(where: { ($0.axDescription ?? "").hasSuffix("메시지 입력") })
+        // Channel chats nest the composer deeper and show a read-only notice text area above it, so search the whole
+        // window outside the transcript, keep only writable text areas, prefer the "…메시지 입력" label, else the bottom-most.
+        let controls = windowControls(in: window)
+        let composers = controls.filter { $0.role == kAXTextAreaRole && isValueSettable($0) }
+        guard let input = composers.first(where: { composerLabel($0).hasSuffix("메시지 입력") })
             ?? composers.max(by: { ($0.frame?.minY ?? 0) < ($1.frame?.minY ?? 0) })
         else {
             throw ValidationError("[BACKGROUND_SAFE_BLOCKED] Window-owned composer unavailable (candidates=0).")
         }
-        let composerInfo = "candidates=\(composers.count) id=\(input.identifier ?? "-") labelMatch=\((input.axDescription ?? "").hasSuffix("메시지 입력"))"
+        let composerInfo = "candidates=\(composers.count) id=\(input.identifier ?? "-") labelMatch=\(composerLabel(input).hasSuffix("메시지 입력"))"
         guard let owner: AXUIElement = input.attributeOptional(kAXWindowAttribute),
               CFEqual(owner, window.axElement),
               input.role == kAXTextAreaRole,
-              input.identifier == "_NS:51" || (input.axDescription ?? "").hasSuffix("메시지 입력"),
+              input.identifier == "_NS:51" || composerLabel(input).hasSuffix("메시지 입력"),
               let inputFrame = input.frame
         else {
             throw ValidationError("[BACKGROUND_SAFE_BLOCKED] Composer does not match the probed window-owned input (\(composerInfo)).")
         }
         // probed Korean direct-child send control only.
-        let buttons = window.children.filter { button in
+        let buttons = controls.filter { button in
             guard button.role == kAXButtonRole, button.title == "전송",
                   let owner: AXUIElement = button.attributeOptional(kAXWindowAttribute),
                   CFEqual(owner, window.axElement),
                   let frame = button.frame,
-                  frame.minY >= inputFrame.maxY, frame.minY - inputFrame.maxY < 120,
+                  frame.minY >= inputFrame.minY - 10, frame.minY - inputFrame.maxY < 120,
                   frame.width > 26, supportsAction(kAXPressAction, on: button)
             else { return false }
             return true
@@ -261,6 +259,31 @@ struct SendCommand: ParsableCommand {
             throw ValidationError("[BACKGROUND_SAFE_UNVERIFIED] AXPress attempted but a new matching last (me) message was not verified; delivery unknown. Do not blindly retry.")
         }
         print("Message sent and verified in the target window (background-safe; content hidden).")
+    }
+
+    private func windowControls(in window: UIElement) -> [UIElement] {
+        var queue = window.children
+        var found: [UIElement] = []
+        var index = 0
+        while index < queue.count && index < 800 {
+            let element = queue[index]
+            index += 1
+            let role = element.role ?? ""
+            if role == kAXTableRole || role == kAXOutlineRole || role == kAXListRole { continue }
+            if role == kAXTextAreaRole || role == kAXButtonRole { found.append(element) }
+            queue.append(contentsOf: element.children)
+        }
+        return found
+    }
+
+    private func isValueSettable(_ element: UIElement) -> Bool {
+        var settable: DarwinBoolean = false
+        return AXUIElementIsAttributeSettable(element.axElement, kAXValueAttribute as CFString, &settable) == .success && settable.boolValue
+    }
+
+    private func composerLabel(_ element: UIElement) -> String {
+        let placeholder: String? = element.attributeOptional(kAXPlaceholderValueAttribute)
+        return element.axDescription ?? placeholder ?? element.title ?? ""
     }
 
     private func lastBubbleTexts(in window: UIElement) -> [String] {
