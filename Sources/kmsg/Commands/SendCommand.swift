@@ -25,6 +25,9 @@ struct SendCommand: ParsableCommand {
     @Flag(name: .long, help: "Don't actually send, just show what would happen")
     var dryRun: Bool = false
 
+    @Flag(name: .long, help: "Send via window-owned AX controls in an already exposed chat; never activate, focus, or use keyboard events")
+    var backgroundSafe: Bool = false
+
     @Flag(name: .long, help: "Show AX traversal and retry details")
     var traceAX: Bool = false
 
@@ -94,6 +97,12 @@ struct SendCommand: ParsableCommand {
     func run() throws {
         if dryRun {
             print("Dry run mode - no message will be sent")
+            if backgroundSafe {
+                let name = recipient ?? chatID ?? ""
+                print("Target: \(name.prefix(1))/len\(name.count)")
+                print("Message length: \(message.count); background-safe")
+                return
+            }
             if let chatID {
                 print("Chat ID: \(chatID)")
             } else {
@@ -103,6 +112,11 @@ struct SendCommand: ParsableCommand {
             if keepWindow {
                 print("Option: keep auto-opened window")
             }
+            return
+        }
+
+        if backgroundSafe {
+            try sendBackgroundSafe()
             return
         }
 
@@ -155,6 +169,99 @@ struct SendCommand: ParsableCommand {
             print("Failed to send message: \(error)")
             throw ExitCode.failure
         }
+    }
+
+    private func sendBackgroundSafe() throws {
+        guard AccessibilityPermission.isGranted() else {
+            throw ValidationError("[BACKGROUND_SAFE_BLOCKED] Accessibility permission is not already granted.")
+        }
+        // no cache or trace in this isolated path.
+        let runner = AXActionRunner(traceEnabled: false)
+        let kakao = try KakaoTalkApp(autoLaunch: false)
+        let resolver = ChatWindowResolver(
+            kakao: kakao, runner: runner, useCache: false, interactionMode: .backgroundSafe
+        )
+        let resolution: ChatWindowResolution
+        do {
+            if let chatID {
+                resolution = try resolver.resolve(chatID: chatID)
+            } else {
+                resolution = try resolver.resolve(query: recipient ?? "")
+            }
+        } catch {
+            throw ValidationError("[BACKGROUND_SAFE_BLOCKED] No matching already exposed chat window; target details hidden.")
+        }
+        let window = resolution.window
+        guard let context = MessageContextResolver(
+            kakao: kakao, runner: runner, useCache: false, interactionMode: .backgroundSafe
+        ).resolve(in: window) else {
+            throw ValidationError("[BACKGROUND_SAFE_BLOCKED] Window-owned composer/transcript unavailable.")
+        }
+        let input = context.inputElement
+        guard let owner: AXUIElement = input.attributeOptional(kAXWindowAttribute),
+              CFEqual(owner, window.axElement),
+              input.role == kAXTextAreaRole,
+              input.identifier == "_NS:51",
+              let inputFrame = input.frame
+        else {
+            throw ValidationError("[BACKGROUND_SAFE_BLOCKED] Composer does not match the probed window-owned input.")
+        }
+        // probed Korean direct-child send control only.
+        let buttons = window.children.filter { button in
+            guard button.role == kAXButtonRole, button.title == "전송",
+                  let owner: AXUIElement = button.attributeOptional(kAXWindowAttribute),
+                  CFEqual(owner, window.axElement),
+                  let frame = button.frame,
+                  frame.minY >= inputFrame.maxY, frame.minY - inputFrame.maxY < 120,
+                  frame.width > 26, supportsAction(kAXPressAction, on: button)
+            else { return false }
+            return true
+        }
+        guard buttons.count == 1, let button = buttons.first else {
+            throw ValidationError("[BACKGROUND_SAFE_BLOCKED] Unique probed window-owned send button unavailable.")
+        }
+        var settable: DarwinBoolean = false
+        guard AXUIElementIsAttributeSettable(input.axElement, kAXValueAttribute as CFString, &settable) == .success,
+              settable.boolValue, input.stringValue == ""
+        else {
+            throw ValidationError("[BACKGROUND_SAFE_BLOCKED] Composer is not writable or has an existing/unknown draft.")
+        }
+        let reader = KakaoTalkTranscriptReader(kakao: kakao, runner: runner, interactionMode: .backgroundSafe)
+        let before: [TranscriptMessage]
+        do {
+            before = try reader.readSnapshot(
+                from: context, chatWindow: window, fallbackChatTitle: "", limit: 50
+            ).messages
+        } catch TranscriptReadError.noMessageRows {
+            before = []
+        } catch TranscriptReadError.noReadableMessages {
+            before = []
+        }
+
+        try input.setAttribute(kAXValueAttribute, value: message as CFString)
+        // KakaoTalk enables the send button asynchronously after an AX value set (measured <=400ms); poll up to 1.5s.
+        var waited = 0.0
+        while !button.isEnabled && waited < 1.5 { Thread.sleep(forTimeInterval: 0.1); waited += 0.1 }
+        guard input.stringValue == message, button.isEnabled else {
+            try? input.setAttribute(kAXValueAttribute, value: "" as CFString)
+            throw ValidationError("[BACKGROUND_SAFE_BLOCKED] AXValue not reflected or send button not enabled; draft may remain. No keyboard fallback.")
+        }
+        // KakaoTalk returns kAXErrorFailure (-25200) from AXPress even when it sends (measured); the transcript check below decides.
+        try? button.press()
+        let previousMe = before.last(where: { $0.author == nil && !$0.isSystem })
+        func verified() -> Bool {
+            guard let after = try? reader.readSnapshot(from: context, chatWindow: window, fallbackChatTitle: "", limit: 50).messages,
+                  let lastMe = after.last(where: { $0.author == nil && !$0.isSystem }) else { return false }
+            return lastMe.body == message && input.stringValue == ""
+                && (lastMe.body != previousMe?.body || lastMe.timeRaw != previousMe?.timeRaw || lastMe.date != previousMe?.date)
+        }
+        var polled = 0.0
+        var ok = verified()
+        while !ok && polled < 4.0 { Thread.sleep(forTimeInterval: 0.25); polled += 0.25; ok = verified() }
+        guard ok else {
+            throw ValidationError("[BACKGROUND_SAFE_UNVERIFIED] AXPress attempted but a new matching last (me) message was not verified; delivery unknown. Do not blindly retry.")
+        }
+        print("Message sent and verified in the target window (background-safe; content hidden).")
     }
 
     private func supportsAction(_ action: String, on element: UIElement) -> Bool {
@@ -493,7 +600,12 @@ struct SendCommand: ParsableCommand {
     }
 
     private func pickMessageInputField(from fields: [UIElement], in window: UIElement) -> UIElement? {
-        fields.sorted { lhs, rhs in
+        // keep only inputs owned by the requested chat window; focused-window inputs caused cross-room reads/sends.
+        fields.filter { field in
+            guard let owner: AXUIElement = field.attributeOptional(kAXWindowAttribute) else { return false }
+            return CFEqual(owner, window.axElement)
+        }
+        .sorted { lhs, rhs in
             let lhsScore = scoreMessageInputCandidate(lhs, in: window)
             let rhsScore = scoreMessageInputCandidate(rhs, in: window)
             return lhsScore > rhsScore
