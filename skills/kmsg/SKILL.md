@@ -80,6 +80,10 @@ opening or moving KakaoTalk:
 kmsg read --chat-id "<chat_id>" --limit 20 --json --background-safe
 ```
 
+If a message body ends with `…`, re-read that chat with `--expand-see-all` to get
+the full text of the see-all (전체보기) bubble. It briefly opens and closes a dialog
+inside KakaoTalk.
+
 ## 4. Watch for new messages
 
 `watch` currently accepts a chat name rather than `chat_id`:
@@ -113,6 +117,11 @@ Inspect the dry-run output for the intended ID and exact text. Then:
 
 - If the user asked for a draft or preview, report the dry run and stop.
 - If recipient or content changed after the dry run, run a new dry run.
+
+When the user wants no focus change, send with `--background-safe` to an already
+open chat window. Exit `0` means the send was verified in that window;
+`[BACKGROUND_SAFE_UNVERIFIED]` means delivery is unknown, so read the chat before
+any retry.
 
 When the message contains quotes, dollar signs, backticks, or newlines, use the
 execution tool's argument-array form when available. Do not build an

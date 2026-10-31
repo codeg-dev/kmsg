@@ -40,8 +40,9 @@ https://github.com/user-attachments/assets/c620b2e3-7106-40fa-86d1-ed847e3b1a6f
 - Send text and images by controlling the visible KakaoTalk UI.
 - Produce structured JSON while keeping AX traces on `stderr`.
 - Run a native stdio MCP server with read, send, and image-send tools.
-- Use background-safe reads, configurable window layouts, recovery modes, and
-  a self-healing AX path cache.
+- Use background-safe reads and sends that touch only the target window,
+  full-text expansion of see-all (전체보기) bubbles, configurable window layouts,
+  recovery modes, and a self-healing AX path cache.
 
 ## Requirements
 

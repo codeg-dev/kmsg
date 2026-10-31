@@ -210,12 +210,20 @@ A chat name and `--chat-id` are mutually exclusive.
 | `--deep-recovery` | Enable deeper window recovery after the fast path fails. |
 | `--layout MODE` | Use `preserve`, `left`, `right`, `split-left`, or `split-right`. Default: `preserve`. |
 | `--json` | Return one structured JSON document. |
+| `--expand-see-all` | For bubbles truncated with `…`, open the see-all (전체보기) dialog in the target window, read the full text, and close the dialog. |
 
 The name form supports partial matching. For repeated automation, use a
 `chat_id` after refreshing the registry with `kmsg chats`.
 
 `--background-safe` is suitable for automation that must not disturb foreground
-work, but it fails unless the matching chat window is already exposed.
+work, but it fails unless the matching chat window is already exposed. It reads
+the requested window even when several chat windows are open and another one has
+focus.
+
+`--expand-see-all` works for both sent and received bubbles. While a see-all
+dialog is open it briefly takes focus inside KakaoTalk, so serialize it with
+sends when several automations share the app, and use it only when a body ends
+with `…`.
 
 #### If `--background-safe` is missing
 
@@ -239,7 +247,10 @@ kmsg read --help
 MCP clients use the JSON argument `background_safe: true` instead of the CLI
 spelling `--background-safe`.
 
-Messages whose author cannot be resolved are represented as `"(me)"`.
+Author values: `"(me)"` is a right-side (sent) bubble, a name is a received
+bubble, `"(peer)"` is a left-side bubble whose sender name could not be
+resolved, and `"(unknown)"` is a bubble whose side could not be determined, such
+as a centered notice.
 
 ### `watch`
 
@@ -278,9 +289,28 @@ kmsg send --chat-id <chat-id> <message> [options]
 | `--refresh-cache` | Remove relevant cached paths before sending. |
 | `-k`, `--keep-window` | Keep chat and list windows opened by the command. |
 | `--deep-recovery` | Enable deeper recovery after the fast path fails. |
+| `--background-safe` | Send to an already exposed matching window without activating KakaoTalk, moving focus, or sending keyboard events. |
 
 Without `--keep-window`, windows opened transiently by the command are closed
 after the send attempt.
+
+#### Background-safe send
+
+`--background-safe` sets the text of the target window's own composer through
+Accessibility and presses that window's send button, so it does not depend on
+which window has focus. It works in friend chats and in channel chats, where
+the composer is labelled `챗봇에게 메시지 입력` and a read-only notice may sit above it.
+
+- It refuses to send when the composer already contains a draft.
+- After pressing send it re-reads the last bubbles of the same window and exits
+  `0` only when the newest one matches the message. Long messages shown
+  truncated with `…` are matched by their visible prefix.
+- Failures are reported as `[BACKGROUND_SAFE_BLOCKED]` (nothing was sent) or
+  `[BACKGROUND_SAFE_UNVERIFIED]` (delivery unknown). Do not retry an unverified
+  send before reading the chat.
+
+When several automations share KakaoTalk, serialize sends, for example with
+`lockf -k /tmp/kmsg-gui.lock kmsg send "Chat name" "Hello" --background-safe`.
 
 ### `send-image`
 
