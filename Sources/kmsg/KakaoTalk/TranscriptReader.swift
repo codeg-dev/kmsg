@@ -188,16 +188,19 @@ struct KakaoTalkTranscriptReader {
 
         rows.append(contentsOf: directRowChildren(from: transcriptRoot))
 
-        let containerCandidates = transcriptRoot.findAll(where: { element in
+        // A direct child table/outline/list is the common layout; avoid a 900-node search when it exists.
+        let directContainers = transcriptRoot.children.filter { [kAXTableRole, kAXOutlineRole, kAXListRole].contains($0.role ?? "") }
+        let containerCandidates = directContainers.isEmpty ? transcriptRoot.findAll(where: { element in
             guard let role = element.role else { return false }
             return role == kAXTableRole || role == kAXOutlineRole || role == kAXListRole || role == kAXScrollAreaRole
-        }, limit: 8, maxNodes: 900)
+        }, limit: 8, maxNodes: 900) : directContainers
 
         for container in containerCandidates {
             rows.append(contentsOf: directRowChildren(from: container))
         }
 
-        if rows.count < targetRowCount {
+        // KakaoTalk exposes every loaded row as a direct table child; the deep row search only helps when none were found.
+        if rows.isEmpty {
             let bfsRows = transcriptRoot.findAll(
                 role: kAXRowRole,
                 limit: max(targetRowCount * 3, 240),
@@ -245,7 +248,7 @@ struct KakaoTalkTranscriptReader {
         referenceDate: Date,
         frameCache: FrameCache
     ) -> [TranscriptMessage] {
-        let analysisBudget = max(limit * 5, 60)
+        let analysisBudget = max(limit * 2, 6)
         let rowsToAnalyze = Array(rows.suffix(analysisBudget))
         let analyses = rowsToAnalyze.map {
             analyzeRow($0, transcriptRoot: transcriptRoot, referenceDate: referenceDate, frameCache: frameCache)
